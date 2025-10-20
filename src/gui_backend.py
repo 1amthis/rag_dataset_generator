@@ -1,6 +1,8 @@
 """Backend logic for GUI interface - extracted from main.py."""
 
 import os
+import json
+import csv
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from dotenv import load_dotenv, set_key
@@ -309,3 +311,327 @@ class DatasetGeneratorBackend:
                     })
 
         return display_data
+
+    def list_output_files(self, output_dir: str = 'output') -> List[str]:
+        """List all dataset output files.
+
+        Args:
+            output_dir: Output directory to search
+
+        Returns:
+            List of output file paths
+        """
+        output_path = Path(output_dir)
+        if not output_path.exists():
+            return []
+
+        files = []
+        for ext in ['.csv', '.json', '.jsonl']:
+            files.extend([str(f) for f in output_path.glob(f'*{ext}')])
+
+        return sorted(files, reverse=True)  # Most recent first
+
+    def load_dataset(self, file_path: str) -> Tuple[List[Dict[str, Any]], str]:
+        """Load a dataset file and return triples.
+
+        Args:
+            file_path: Path to dataset file
+
+        Returns:
+            Tuple of (triples_list, source_document_name)
+        """
+        path = Path(file_path)
+        extension = path.suffix.lower()
+
+        triples = []
+        source_doc = ""
+
+        if extension == '.csv':
+            with open(file_path, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if not source_doc and row.get('source_file'):
+                        source_doc = row['source_file']
+
+                    triples.append({
+                        'question': row.get('question', ''),
+                        'answer': row.get('answer', ''),
+                        'citation': row.get('citation', ''),
+                        'citation_valid': row.get('citation_valid', 'true').lower() == 'true'
+                    })
+
+        elif extension == '.json':
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    triples = data
+                    if triples and 'metadata' in triples[0]:
+                        source_doc = triples[0]['metadata'].get('source_file', '')
+
+        elif extension == '.jsonl':
+            with open(file_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    triple = json.loads(line)
+                    triples.append(triple)
+                    if not source_doc and 'metadata' in triple:
+                        source_doc = triple['metadata'].get('source_file', '')
+
+        return triples, source_doc
+
+    def get_citation_colors(self, num_citations: int) -> List[str]:
+        """Generate color palette for citations.
+
+        Args:
+            num_citations: Number of unique colors needed
+
+        Returns:
+            List of color codes (hex or rgba)
+        """
+        # Predefined color palette with good contrast
+        base_colors = [
+            'rgba(255, 235, 59, 0.4)',   # Yellow
+            'rgba(156, 39, 176, 0.3)',   # Purple
+            'rgba(0, 188, 212, 0.3)',    # Cyan
+            'rgba(255, 152, 0, 0.3)',    # Orange
+            'rgba(76, 175, 80, 0.3)',    # Green
+            'rgba(244, 67, 54, 0.3)',    # Red
+            'rgba(63, 81, 181, 0.3)',    # Indigo
+            'rgba(233, 30, 99, 0.3)',    # Pink
+            'rgba(0, 150, 136, 0.3)',    # Teal
+            'rgba(255, 193, 7, 0.3)',    # Amber
+            'rgba(121, 85, 72, 0.3)',    # Brown
+            'rgba(96, 125, 139, 0.3)',   # Blue Grey
+        ]
+
+        # Repeat colors if needed
+        colors = []
+        for i in range(num_citations):
+            colors.append(base_colors[i % len(base_colors)])
+
+        return colors
+
+    def create_highlighted_html(
+        self,
+        document_content: str,
+        triples: List[Dict[str, Any]],
+        hide_invalid: bool = True
+    ) -> str:
+        """Create HTML with highlighted citations.
+
+        Args:
+            document_content: Full document text
+            triples: List of Q/A/Citation triples
+            hide_invalid: If True, only highlight valid citations
+
+        Returns:
+            HTML string with highlighted citations
+        """
+        # Filter triples if hiding invalid
+        if hide_invalid:
+            valid_triples = [t for t in triples if t.get('citation_valid', True)]
+        else:
+            valid_triples = triples
+
+        if not valid_triples:
+            return "<div style='padding: 20px;'>No valid citations found in dataset.</div>"
+
+        # Get colors for citations
+        colors = self.get_citation_colors(len(valid_triples))
+
+        # Normalize text for matching
+        def normalize(text):
+            return ' '.join(text.split())
+
+        # Find citation positions in original text
+        highlights = []  # List of dicts with position info
+
+        for idx, triple in enumerate(valid_triples):
+            citation = triple['citation']
+            normalized_citation = normalize(citation)
+            normalized_doc = normalize(document_content)
+
+            # Find citation in normalized document
+            norm_pos = normalized_doc.find(normalized_citation)
+
+            if norm_pos != -1:
+                # Map back to original document position
+                # This is approximate - count words to find position
+                words_before = normalized_doc[:norm_pos].split()
+                target_word_count = len(words_before)
+
+                # Find position in original text
+                word_count = 0
+                char_pos = 0
+                for i, char in enumerate(document_content):
+                    if char.isspace() and i > 0 and not document_content[i-1].isspace():
+                        word_count += 1
+                        if word_count >= target_word_count:
+                            char_pos = i
+                            break
+
+                # Find end position (approximate length)
+                citation_word_count = len(normalized_citation.split())
+                end_word_count = 0
+                end_pos = char_pos
+
+                for i in range(char_pos, len(document_content)):
+                    if document_content[i].isspace() and i > char_pos and not document_content[i-1].isspace():
+                        end_word_count += 1
+                        if end_word_count >= citation_word_count:
+                            end_pos = i
+                            break
+
+                if end_pos == char_pos:
+                    end_pos = min(char_pos + len(citation), len(document_content))
+
+                highlights.append({
+                    'start': char_pos,
+                    'end': end_pos,
+                    'id': idx,
+                    'color': colors[idx],
+                    'question': triple['question'].replace("'", "&apos;").replace('"', '&quot;'),
+                    'answer': triple['answer'].replace("'", "&apos;").replace('"', '&quot;'),
+                    'citation': citation
+                })
+
+        # Sort highlights by position
+        highlights.sort(key=lambda x: x['start'])
+
+        # Build HTML
+        html = """
+        <style>
+            .citation-viewer {
+                font-family: Georgia, serif;
+                line-height: 1.8;
+                padding: 20px;
+                background: white;
+                border-radius: 8px;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            }
+            .citation-mark {
+                cursor: pointer;
+                padding: 2px 4px;
+                border-radius: 3px;
+                transition: all 0.2s;
+                position: relative;
+                border: 1px solid rgba(0,0,0,0.1);
+            }
+            .citation-mark:hover {
+                opacity: 0.8;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+                transform: scale(1.02);
+            }
+            .citation-number {
+                font-size: 0.75em;
+                font-weight: bold;
+                vertical-align: super;
+                margin-left: 2px;
+                color: #333;
+            }
+            .legend {
+                margin-bottom: 20px;
+                padding: 15px;
+                background: #f5f5f5;
+                border-radius: 5px;
+                border: 1px solid #ddd;
+            }
+            .legend-item {
+                display: inline-block;
+                margin: 5px 10px;
+                padding: 5px 10px;
+                border-radius: 3px;
+                font-size: 0.9em;
+                border: 1px solid rgba(0,0,0,0.1);
+            }
+            .document-content {
+                white-space: pre-wrap;
+                word-wrap: break-word;
+            }
+        </style>
+        <div class="citation-viewer">
+        """
+
+        # Add legend
+        html += '<div class="legend"><strong>📌 Citations:</strong> Click on highlighted text to view the question and answer<br><br>'
+        for idx, triple in enumerate(valid_triples):
+            color = colors[idx]
+            q_preview = triple['question'][:50] + '...' if len(triple['question']) > 50 else triple['question']
+            html += f'<span class="legend-item" style="background: {color};" title="{triple["question"]}">[{idx + 1}] {q_preview}</span>'
+        html += '</div>'
+
+        # Build document with highlighted sections
+        html += '<div class="document-content">'
+
+        # Insert highlights
+        result = []
+        last_pos = 0
+
+        for highlight in highlights:
+            # Add text before highlight
+            result.append(self._escape_html(document_content[last_pos:highlight['start']]))
+
+            # Add highlighted citation
+            citation_text = self._escape_html(document_content[highlight['start']:highlight['end']])
+            onclick = f"alert('Question #{highlight['id'] + 1}:\\n\\n{highlight['question']}\\n\\nAnswer:\\n\\n{highlight['answer']}')"
+
+            result.append(
+                f'<mark class="citation-mark" style="background: {highlight["color"]};" '
+                f'onclick="{onclick}" title="Click to view Q&A">'
+                f'{citation_text}<span class="citation-number">[{highlight["id"] + 1}]</span></mark>'
+            )
+
+            last_pos = highlight['end']
+
+        # Add remaining text
+        result.append(self._escape_html(document_content[last_pos:]))
+
+        html += ''.join(result)
+        html += '</div></div>'
+
+        return html
+
+    def _escape_html(self, text: str) -> str:
+        """Escape HTML special characters.
+
+        Args:
+            text: Text to escape
+
+        Returns:
+            Escaped text
+        """
+        return (text
+                .replace('&', '&amp;')
+                .replace('<', '&lt;')
+                .replace('>', '&gt;')
+                .replace('"', '&quot;')
+                .replace("'", '&#39;'))
+
+    def get_source_document_content(self, source_file: str) -> str:
+        """Get the parsed content of the source document.
+
+        Args:
+            source_file: Original source document filename
+
+        Returns:
+            Parsed document content
+        """
+        if not self.parser:
+            raise ValueError("Parser not initialized. Please configure API key first.")
+
+        # Try to find the source file
+        # Check current directory and common locations
+        search_paths = [
+            Path(source_file),
+            Path.cwd() / source_file,
+            Path.cwd() / Path(source_file).name,
+        ]
+
+        for path in search_paths:
+            if path.exists():
+                try:
+                    parsed = self.parser.parse_document(str(path))
+                    return parsed['content']
+                except Exception as e:
+                    raise ValueError(f"Error parsing document: {str(e)}")
+
+        raise FileNotFoundError(f"Source document not found: {source_file}")

@@ -198,6 +198,110 @@ def load_saved_api_key() -> str:
     return backend.config.get('api_key', '')
 
 
+def refresh_dataset_files() -> gr.Dropdown:
+    """Refresh list of available dataset files."""
+    files = backend.list_output_files()
+    if not files:
+        return gr.Dropdown(choices=[], value=None)
+
+    # Format choices to show just filename
+    choices = [str(Path(f).name) for f in files]
+    file_map = {Path(f).name: f for f in files}
+
+    return gr.Dropdown(choices=choices, value=choices[0] if choices else None)
+
+
+def load_and_display_dataset(
+    dataset_file: str,
+    api_key: str,
+    model: str,
+    max_tokens: int
+) -> Tuple[str, str, pd.DataFrame]:
+    """Load dataset and create interactive visualization.
+
+    Args:
+        dataset_file: Selected dataset filename
+        api_key: OpenAI API key
+        model: Model name
+        max_tokens: Max tokens for parsing
+
+    Returns:
+        Tuple of (dataset_info_markdown, html_viewer, qa_dataframe)
+    """
+    if not dataset_file:
+        return "⚠️ No dataset selected.", "<div style='padding: 40px; text-align: center; color: #666;'>No dataset loaded</div>", pd.DataFrame()
+
+    if not api_key:
+        return "⚠️ API key required to parse source document.", "<div style='padding: 40px; text-align: center; color: #666;'>API key required</div>", pd.DataFrame()
+
+    try:
+        # Find full path
+        output_dir = Path('output')
+        dataset_path = output_dir / dataset_file
+
+        if not dataset_path.exists():
+            return f"⚠️ File not found: {dataset_file}", "<div>File not found</div>", pd.DataFrame()
+
+        # Load dataset
+        triples, source_doc = backend.load_dataset(str(dataset_path))
+
+        if not triples:
+            return "⚠️ No data found in dataset.", "<div>No data found</div>", pd.DataFrame()
+
+        # Initialize parser
+        backend.initialize_components(
+            api_key=api_key,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=0.7,
+            min_triples=0,
+            max_triples=10,
+            output_dir='output'
+        )
+
+        # Get source document content
+        try:
+            doc_content = backend.get_source_document_content(source_doc)
+        except (FileNotFoundError, ValueError) as e:
+            return f"⚠️ Could not load source document: {str(e)}", "<div>Source document not found</div>", pd.DataFrame()
+
+        # Create highlighted HTML
+        html_output = backend.create_highlighted_html(doc_content, triples, hide_invalid=True)
+
+        # Create dataset info
+        valid_count = sum(1 for t in triples if t.get('citation_valid', True))
+        invalid_count = len(triples) - valid_count
+
+        info = f"""
+### Dataset Information
+
+- **Source Document:** {source_doc}
+- **Total Q/A Pairs:** {len(triples)}
+- **Valid Citations:** {valid_count}
+- **Invalid Citations:** {invalid_count} (hidden from view)
+- **Dataset File:** {dataset_file}
+"""
+
+        # Create Q/A dataframe
+        qa_data = []
+        for idx, triple in enumerate(triples):
+            if triple.get('citation_valid', True):  # Only show valid ones
+                qa_data.append({
+                    '#': idx + 1,
+                    'Question': triple['question'],
+                    'Answer': triple['answer'],
+                    'Citation Preview': triple['citation'][:100] + '...' if len(triple['citation']) > 100 else triple['citation']
+                })
+
+        df = pd.DataFrame(qa_data) if qa_data else pd.DataFrame()
+
+        return info, html_output, df
+
+    except Exception as e:
+        error_msg = f"⚠️ Error loading dataset: {str(e)}"
+        return error_msg, f"<div style='padding: 20px; color: red;'>{error_msg}</div>", pd.DataFrame()
+
+
 # Build Gradio interface
 def build_interface():
     """Build and return Gradio interface."""
@@ -336,6 +440,84 @@ def build_interface():
                             show_label=False
                         )
 
+            # Citation Viewer Tab
+            with gr.Tab("🔍 Citation Viewer"):
+                gr.Markdown("""
+                ## Interactive Citation Explorer
+                Load a previously generated dataset and explore the document with highlighted citations.
+                Click on highlighted citations to see their associated questions and answers.
+                """)
+
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        gr.Markdown("### 1️⃣ Load Dataset", elem_classes="section-header")
+
+                        dataset_file_dropdown = gr.Dropdown(
+                            label="Select Dataset File",
+                            choices=[],
+                            interactive=True,
+                            info="Choose from previously generated datasets"
+                        )
+
+                        refresh_files_btn = gr.Button("🔄 Refresh File List", variant="secondary")
+
+                        load_dataset_btn = gr.Button("📂 Load Dataset", variant="primary")
+
+                        gr.Markdown("### ⚙️ Configuration", elem_classes="section-header")
+
+                        viewer_api_key = gr.Textbox(
+                            label="OpenAI API Key (for parsing)",
+                            type="password",
+                            placeholder="sk-...",
+                            value=load_saved_api_key(),
+                            info="Required to re-parse source document"
+                        )
+
+                        viewer_model = gr.Dropdown(
+                            choices=["gpt-4.1", "gpt-4-turbo", "gpt-4", "gpt-3.5-turbo"],
+                            value="gpt-4.1",
+                            label="Model (for parsing)",
+                            visible=False  # Hidden by default
+                        )
+
+                        viewer_max_tokens = gr.Slider(
+                            minimum=1000,
+                            maximum=20000,
+                            value=10000,
+                            step=1000,
+                            label="Max Tokens",
+                            visible=False  # Hidden by default
+                        )
+
+                        dataset_info_md = gr.Markdown("Load a dataset to see information here.")
+
+                    with gr.Column(scale=2):
+                        gr.Markdown("### 📄 Interactive Document View", elem_classes="section-header")
+
+                        with gr.Row():
+                            gr.Markdown("*Citations are color-coded. Click on highlighted text to view Q&A.*")
+
+                        citation_html = gr.HTML(
+                            value="<div style='padding: 40px; text-align: center; color: #666;'>Load a dataset to view interactive citations</div>"
+                        )
+
+                        gr.Markdown("### 📋 Questions & Answers", elem_classes="section-header")
+
+                        qa_display = gr.Dataframe(
+                            headers=["#", "Question", "Answer", "Citation Preview"],
+                            label="All Q/A Pairs from Dataset",
+                            wrap=True
+                        )
+
+                        gr.Markdown("""
+                        **How to use:**
+                        1. Select a dataset file from the dropdown
+                        2. Click "Load Dataset"
+                        3. View the document with highlighted citations above
+                        4. Click any highlighted citation to see its Q&A in a popup
+                        5. Browse all Q&A pairs in the table below
+                        """)
+
             # Help Tab
             with gr.Tab("❓ Help"):
                 gr.Markdown("""
@@ -388,6 +570,29 @@ def build_interface():
                 - Exact citation (text snippet)
                 - Validation status
 
+                ## Citation Viewer
+
+                The Citation Viewer tab lets you interactively explore generated datasets:
+
+                ### How to Use Citation Viewer
+                1. Go to the "Citation Viewer" tab
+                2. Click "Refresh File List" to see all generated datasets
+                3. Select a dataset file from the dropdown
+                4. Enter your API key (needed to re-parse the source document)
+                5. Click "Load Dataset"
+                6. Explore:
+                   - **Document view**: Citations are color-coded and clickable
+                   - **Click any highlighted citation** to see its Q&A in a popup
+                   - **Legend**: Shows which color = which question
+                   - **Table below**: Browse all Q&A pairs
+
+                ### Features
+                - Color-coded citations for easy identification
+                - Click citations to instantly view questions and answers
+                - Only shows valid citations (invalid ones are hidden)
+                - Legend shows question previews for each citation
+                - Full Q&A table for reference
+
                 ## Troubleshooting
 
                 **"API key not found"**
@@ -398,6 +603,9 @@ def build_interface():
 
                 **"Invalid citations detected"**
                 → Normal - some citations may have minor formatting differences
+
+                **"Source document not found" in Citation Viewer**
+                → Make sure the original document is in the same location as when you generated the dataset
                 """)
 
         # Wire up event handlers
@@ -421,6 +629,26 @@ def build_interface():
                 save_key_checkbox
             ],
             outputs=[summary_output, results_table, download_output]
+        )
+
+        # Citation Viewer event handlers
+        refresh_files_btn.click(
+            fn=refresh_dataset_files,
+            inputs=[],
+            outputs=[dataset_file_dropdown]
+        )
+
+        load_dataset_btn.click(
+            fn=load_and_display_dataset,
+            inputs=[dataset_file_dropdown, viewer_api_key, viewer_model, viewer_max_tokens],
+            outputs=[dataset_info_md, citation_html, qa_display]
+        )
+
+        # Auto-populate dropdown on tab load
+        app.load(
+            fn=refresh_dataset_files,
+            inputs=[],
+            outputs=[dataset_file_dropdown]
         )
 
     return app
