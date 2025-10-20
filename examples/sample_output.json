@@ -1,0 +1,38 @@
+[
+  {
+    "document_id": "sample_document",
+    "source_file": "/path/to/sample_document.pdf",
+    "file_type": ".pdf",
+    "question": "What is RAG?",
+    "answer": "RAG stands for Retrieval Augmented Generation, a technique that combines document retrieval with language model generation.",
+    "citation": "Retrieval Augmented Generation (RAG) is a technique that combines document retrieval with language model generation to provide more accurate and contextual responses.",
+    "citation_valid": true,
+    "total_chunks": 15,
+    "included_chunks": 12,
+    "timestamp": "2025-01-15T10:30:45.123456"
+  },
+  {
+    "document_id": "sample_document",
+    "source_file": "/path/to/sample_document.pdf",
+    "file_type": ".pdf",
+    "question": "How does RAG improve accuracy?",
+    "answer": "RAG improves accuracy by grounding language model responses in retrieved documents, reducing hallucinations.",
+    "citation": "By grounding responses in retrieved documents, RAG systems significantly reduce hallucinations and improve factual accuracy.",
+    "citation_valid": true,
+    "total_chunks": 15,
+    "included_chunks": 12,
+    "timestamp": "2025-01-15T10:30:45.123456"
+  },
+  {
+    "document_id": "sample_document",
+    "source_file": "/path/to/sample_document.pdf",
+    "file_type": ".pdf",
+    "question": "What are the main components of a RAG system?",
+    "answer": "The main components are a document retriever, a vector database, and a language model generator.",
+    "citation": "A typical RAG system consists of three main components: a document retriever, a vector database for storing embeddings, and a language model for generation.",
+    "citation_valid": true,
+    "total_chunks": 15,
+    "included_chunks": 12,
+    "timestamp": "2025-01-15T10:30:45.123456"
+  }
+]
