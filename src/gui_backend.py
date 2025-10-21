@@ -3,6 +3,7 @@
 import os
 import json
 import csv
+import re
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from dotenv import load_dotenv, set_key
@@ -445,59 +446,95 @@ class DatasetGeneratorBackend:
         # Find citation positions in original text
         highlights = []  # List of dicts with position info
 
+        # Pre-compute normalized document for approximate matching
+        normalized_doc = normalize(document_content)
+
         for idx, triple in enumerate(valid_triples):
             citation = triple['citation']
-            normalized_citation = normalize(citation)
-            normalized_doc = normalize(document_content)
 
-            # Find citation in normalized document
-            norm_pos = normalized_doc.find(normalized_citation)
+            # Try direct match first (fast path)
+            pos = document_content.find(citation)
 
-            if norm_pos != -1:
-                # Map back to original document position
-                # This is approximate - count words to find position
-                words_before = normalized_doc[:norm_pos].split()
-                target_word_count = len(words_before)
-
-                # Find position in original text
-                word_count = 0
-                char_pos = 0
-                for i, char in enumerate(document_content):
-                    if char.isspace() and i > 0 and not document_content[i-1].isspace():
-                        word_count += 1
-                        if word_count >= target_word_count:
-                            char_pos = i
-                            break
-
-                # Find end position (approximate length)
-                citation_word_count = len(normalized_citation.split())
-                end_word_count = 0
-                end_pos = char_pos
-
-                for i in range(char_pos, len(document_content)):
-                    if document_content[i].isspace() and i > char_pos and not document_content[i-1].isspace():
-                        end_word_count += 1
-                        if end_word_count >= citation_word_count:
-                            end_pos = i
-                            break
-
-                if end_pos == char_pos:
-                    end_pos = min(char_pos + len(citation), len(document_content))
-
+            if pos != -1:
+                # Found exact match
                 highlights.append({
-                    'start': char_pos,
-                    'end': end_pos,
+                    'start': pos,
+                    'end': pos + len(citation),
                     'id': idx,
                     'color': colors[idx],
-                    'question': triple['question'].replace("'", "&apos;").replace('"', '&quot;'),
-                    'answer': triple['answer'].replace("'", "&apos;").replace('"', '&quot;'),
+                    'question': triple['question'],
+                    'answer': triple['answer'],
                     'citation': citation
                 })
+                continue
+
+            # Try whitespace-flexible matching using regex
+            citation_escaped = re.escape(citation)
+            citation_pattern = re.sub(r'\\\s+', r'\\s+', citation_escaped)
+            match = re.search(citation_pattern, document_content)
+
+            if match:
+                highlights.append({
+                    'start': match.start(),
+                    'end': match.end(),
+                    'id': idx,
+                    'color': colors[idx],
+                    'question': triple['question'],
+                    'answer': triple['answer'],
+                    'citation': citation
+                })
+                continue
+
+            # Fallback: approximate matching using normalized text and word counts
+            normalized_citation = normalize(citation)
+            if not normalized_citation:
+                continue
+
+            norm_pos = normalized_doc.find(normalized_citation)
+            if norm_pos == -1:
+                continue
+
+            words_before = normalized_doc[:norm_pos].split()
+            target_word_count = len(words_before)
+
+            word_count = 0
+            char_pos = 0
+            for i, char in enumerate(document_content):
+                if char.isspace() and i > 0 and not document_content[i - 1].isspace():
+                    word_count += 1
+                    if word_count >= target_word_count:
+                        char_pos = i
+                        break
+
+            citation_word_count = len(normalized_citation.split())
+            end_word_count = 0
+            end_pos = char_pos
+
+            for i in range(char_pos, len(document_content)):
+                if (document_content[i].isspace() and i > char_pos
+                        and not document_content[i - 1].isspace()):
+                    end_word_count += 1
+                    if end_word_count >= citation_word_count:
+                        end_pos = i
+                        break
+
+            if end_pos == char_pos:
+                end_pos = min(char_pos + len(citation), len(document_content))
+
+            highlights.append({
+                'start': char_pos,
+                'end': end_pos,
+                'id': idx,
+                'color': colors[idx],
+                'question': triple['question'],
+                'answer': triple['answer'],
+                'citation': citation
+            })
 
         # Sort highlights by position
         highlights.sort(key=lambda x: x['start'])
 
-        # Build HTML
+        # Build HTML sections (CSS only; no embedded script for compatibility)
         html = """
         <style>
             .citation-viewer {
@@ -551,12 +588,22 @@ class DatasetGeneratorBackend:
         <div class="citation-viewer">
         """
 
-        # Add legend
+        # Create set of found citation IDs
+        found_ids = {h['id'] for h in highlights}
+
+        # Add legend - only show citations that were found
         html += '<div class="legend"><strong>📌 Citations:</strong> Click on highlighted text to view the question and answer<br><br>'
-        for idx, triple in enumerate(valid_triples):
-            color = colors[idx]
-            q_preview = triple['question'][:50] + '...' if len(triple['question']) > 50 else triple['question']
-            html += f'<span class="legend-item" style="background: {color};" title="{triple["question"]}">[{idx + 1}] {q_preview}</span>'
+        if found_ids:
+            for idx, triple in enumerate(valid_triples):
+                if idx in found_ids:
+                    color = colors[idx]
+                    q_preview = triple['question'][:50] + '...' if len(triple['question']) > 50 else triple['question']
+                    # Escape for HTML attributes
+                    question_escaped = self._escape_html(triple['question'])
+                    q_preview_escaped = self._escape_html(q_preview)
+                    html += f'<span class="legend-item" style="background: {color};" title="{question_escaped}">[{idx + 1}] {q_preview_escaped}</span>'
+        else:
+            html += '<em style="color: #666;">No citations found in document</em>'
         html += '</div>'
 
         # Build document with highlighted sections
@@ -572,11 +619,19 @@ class DatasetGeneratorBackend:
 
             # Add highlighted citation
             citation_text = self._escape_html(document_content[highlight['start']:highlight['end']])
-            onclick = f"alert('Question #{highlight['id'] + 1}:\\n\\n{highlight['question']}\\n\\nAnswer:\\n\\n{highlight['answer']}')"
+
+            message = (
+                f"Question #{highlight['id'] + 1}:\n\n"
+                f"{highlight['question']}\n\n"
+                f"Answer:\n\n"
+                f"{highlight['answer']}"
+            )
+            message_js = json.dumps(message)
+            message_attr = self._escape_html(message_js)
 
             result.append(
                 f'<mark class="citation-mark" style="background: {highlight["color"]};" '
-                f'onclick="{onclick}" title="Click to view Q&A">'
+                f'onclick="alert({message_attr})" title="Click to view Q&A">'
                 f'{citation_text}<span class="citation-number">[{highlight["id"] + 1}]</span></mark>'
             )
 

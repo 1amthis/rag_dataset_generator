@@ -7,8 +7,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 RAG Dataset Generator - A Python tool that generates question/answer/citation triples from documents for RAG evaluation using ChunkNorris for parsing and GPT-4.1 for generation.
 
 **Two interfaces:**
-- **GUI (Gradio)**: Browser-based drag-and-drop interface for non-technical users
+- **GUI (Gradio)**: Browser-based drag-and-drop interface for non-technical users (includes a working citation viewer with alert-style popups)
 - **CLI**: Command-line interface for automation and advanced use
+
+**Repository diagnostic files:**
+- `ALTERNATIVES.md` - Analysis of Citation Viewer issues and potential solutions
+- `diagnose_issue.py` - Diagnostic script for testing HTML generation
+- `test_gradio_html.py` - Test script for Gradio HTML component compatibility
+- `diagnostic_output.html` - Sample HTML output for debugging
 
 ## Development Setup
 
@@ -152,11 +158,18 @@ Input Document
 The GUI is built with Gradio and separated into:
 
 ### gui_gradio.py (UI Layer)
-- Gradio interface definition
+- Gradio interface definition with multiple tabs
 - Event handlers for buttons/inputs
 - Visual components (sliders, file upload, tables)
+- Document preview functionality
 - Help tab with documentation
 - Runs on port 7860 by default
+
+**Main tabs:**
+- **Generate Dataset**: File upload and processing controls
+- **Document Preview**: Preview parsed text before processing
+- **Citation Viewer**: Highlights citations in the source document and shows the related Q/A pairs in a browser alert when clicked
+- **Help**: Usage documentation
 
 ### gui_backend.py (Business Logic)
 - `DatasetGeneratorBackend` class encapsulates all processing
@@ -169,10 +182,19 @@ The GUI is built with Gradio and separated into:
 **Key methods:**
 - `initialize_components()` - setup parser/generator/writer
 - `process_documents()` - batch processing with progress
-- `estimate_cost()` - preview API costs
 - `validate_files()` - check file formats
 - `format_results_summary()` - generate summary text
 - `get_triples_dataframe()` - format for table display
+- `get_parsed_previews()` - preview parsed document text before processing
+- `load_dataset()` - load existing dataset files from output directory
+- `list_output_files()` - list all generated dataset files
+- `get_source_document_content()` - parse source documents for citation viewer
+- `create_highlighted_html()` - generate HTML with citation highlights and inline Q/A popups
+- `get_citation_colors()` - generate color palette for citation highlighting
+- `_escape_html()` - HTML escaping utility
+
+**Note on estimate_cost():**
+This method is located in `generator.py` (line 233), not in gui_backend.py. It estimates API costs based on token count.
 
 ## Testing Without API Key
 
@@ -186,3 +208,23 @@ To test parsing without LLM costs:
 **GUI:**
 1. Upload files and use "Estimate Cost" button (requires API key for initialization)
 2. Or modify gui_backend.py to skip generator initialization for testing
+
+## Known Limitations
+
+### Citation Viewer Interactions
+
+**Status:** Functional with lightweight pop-up alerts
+
+**Behavior:**
+- Citations are highlighted inline and clicking a highlight opens a native `alert()` with the related question and answer.
+- The viewer intentionally skips citations that cannot be matched back to the source text after whitespace normalization, so a dataset containing only invalid citations will render the "No valid citations found" message.
+
+**Trade-offs:**
+1. Alerts interrupt the browsing flow; they are the simplest interaction that works reliably inside `gr.HTML`.
+2. There is no side-panel or rich modal today—enhancements would require more complex component wiring or exporting to standalone HTML.
+3. Matching is tolerant of whitespace differences but still sensitive to heavy paraphrasing or punctuation changes.
+
+**Future Improvements:**
+- Replace alerts with a custom Gradio component (e.g., side panel) that shows the Q/A when a citation is clicked.
+- Offer an "Include invalid citations" toggle for debugging datasets.
+- Export a standalone HTML report with richer interactivity when needed.
